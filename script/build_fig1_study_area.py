@@ -1,8 +1,20 @@
 #!/usr/bin/env python3
 """
-Figure 1: Study Area Map
-- Inset: OSM showing Sumatera, Kalimantan, Java, Bali with AOI box
-- Main: Sentinel-2 RGB basemap with transparent H3 grid overlay showing recorded species
+Figure 1: Study Area Map.
+
+Rebuilt in response to Reviewer 2's comment 6, which asked for a higher-resolution
+basemap, better contrast, and geographic rather than UTM coordinates:
+
+  * basemap is now the local Sentinel-2 S2DR3 super-resolved scene (1 m native,
+    resampled to 3000 px across the AOI) instead of zoom-13 web tiles, which were
+    too coarse to identify locations;
+  * a 2-98 percentile contrast stretch is applied per band, since the raw scene is
+    dominated by dark forest and reads as a flat green mass;
+  * axes are WGS84 with degree/minute/second tick labels;
+  * the regional inset sits outside the map frame so it no longer covers data.
+
+Cell counts in the legend are read from the analysis outputs, so they track the
+corrected 38-of-149 tessellation rather than being hardcoded.
 """
 
 # ── Portable project root (auto-inserted; replaces a hardcoded absolute path) ──
@@ -25,228 +37,277 @@ def _reeps_base() -> _Path:
 REEPS_BASE = _reeps_base()
 # ──────────────────────────────────────────────────────────────────────────────
 
+import os
 
 import geopandas as gpd
-import matplotlib.pyplot as plt
+import h3
+import matplotlib as mpl
 import matplotlib.patches as mpatches
-from matplotlib.patches import Rectangle
-from shapely.geometry import box
-import contextily as ctx
+import matplotlib.pyplot as plt
 import numpy as np
-import os
-from xyzservices import TileProvider
+import pandas as pd
+import rasterio
 from matplotlib.ticker import FuncFormatter
+from rasterio.transform import array_bounds
+from rasterio.transform import from_bounds as transform_from_bounds
+from rasterio.warp import Resampling, calculate_default_transform, reproject
+from shapely.geometry import Polygon, box
 
-# Set working directory
 os.chdir(str(REEPS_BASE))
 
-# AOI bounds (lon/lat)
-LON_MIN, LON_MAX = 107.15, 107.30
-LAT_MIN, LAT_MAX = -6.95, -6.85
-UTM_CRS = "EPSG:32748"
+S2_TIF = "Sentinel2_S2DR3_30Sep24_RGB.tif"
+# 5000 px across the ~0.196 deg AOI is ~4.3 m/px, against ~19 m/px for the zoom-13
+# web tiles this figure previously used. Figure 1 is a full-page single map, so it
+# carries a finer basemap than the multi-panel figures (3000 px).
+TARGET_W = 5000
+DST_CRS = "EPSG:4326"
+
+# Inset extent: Sumatra, Kalimantan, Java, Bali
+INSET_LON = (95, 120)
+INSET_LAT = (-10, 7)
+
+
+def dms(value: float, axis: str) -> str:
+    """Format a signed decimal degree as degrees/minutes/seconds with a hemisphere."""
+    hemi = ("N" if value >= 0 else "S") if axis == "lat" else ("E" if value >= 0 else "W")
+    v = abs(value)
+    d = int(v)
+    m_float = (v - d) * 60
+    m = int(m_float)
+    s = (m_float - m) * 60
+    if round(s) == 60:          # carry, so 6°59'60" prints as 7°00'00"
+        s, m = 0.0, m + 1
+    if m == 60:
+        m, d = 0, d + 1
+    return f"{d}°{m:02d}'{round(s):02d}\"{hemi}"
+
+
+def stretch(band: np.ndarray, lo_pct: float = 2.0, hi_pct: float = 98.0) -> np.ndarray:
+    """Percentile contrast stretch to [0, 1].
+
+    Reviewer 2 noted the true-colour composite has very limited contrast between
+    land-cover features. The scene is mostly closed-canopy forest, so the raw
+    digital numbers occupy a narrow part of the range; clipping to the 2nd and
+    98th percentiles of the valid pixels spreads them across the full range.
+    """
+    valid = band[band > 0]
+    if valid.size == 0:
+        return band.astype(np.float32)
+    lo, hi = np.percentile(valid, [lo_pct, hi_pct])
+    if hi <= lo:
+        return band.astype(np.float32) / 255.0
+    return np.clip((band.astype(np.float32) - lo) / (hi - lo), 0, 1)
+
+
+def load_basemap():
+    """Warp the Sentinel-2 scene to WGS84, resample, and stretch each band."""
+    print("Loading Sentinel-2 S2DR3 basemap (warping to WGS84) …")
+    with rasterio.open(S2_TIF) as src:
+        transform_native, width_native, height_native = calculate_default_transform(
+            src.crs, DST_CRS, src.width, src.height, *src.bounds
+        )
+        scale = TARGET_W / width_native
+        dst_w = TARGET_W
+        dst_h = max(1, int(height_native * scale))
+
+        b = array_bounds(height_native, width_native, transform_native)
+        dst_transform = transform_from_bounds(b[0], b[1], b[2], b[3], dst_w, dst_h)
+
+        rgb = np.zeros((3, dst_h, dst_w), dtype=np.uint8)
+        for i in range(1, 4):
+            reproject(
+                source=rasterio.band(src, i),
+                destination=rgb[i - 1],
+                src_transform=src.transform,
+                src_crs=src.crs,
+                dst_transform=dst_transform,
+                dst_crs=DST_CRS,
+                resampling=Resampling.bilinear,
+            )
+
+    img = np.zeros((dst_h, dst_w, 3), dtype=np.float32)
+    for i in range(3):
+        img[:, :, i] = stretch(rgb[i])
+
+    extent = (b[0], b[2], b[1], b[3])   # left, right, bottom, top
+    print(f"  {dst_w}×{dst_h} px, extent "
+          f"[{extent[0]:.4f}, {extent[1]:.4f}] × [{extent[2]:.4f}, {extent[3]:.4f}]")
+    return img, extent
+
+
+def _regional_inset(ax, aoi_bounds) -> None:
+    """Locator map of the western Indonesian archipelago with the AOI marked.
+
+    OpenStreetMap's tile servers reject contextily's default user agent, so we try
+    a short list of providers and fall back to a plain extent box rather than
+    letting the figure carry "Access blocked" tiles.
+    """
+    import contextily as ctx
+
+    bnds = (
+        gpd.GeoSeries([box(INSET_LON[0], INSET_LAT[0], INSET_LON[1], INSET_LAT[1])],
+                      crs="EPSG:4326").to_crs(epsg=3857).total_bounds
+    )
+    ax.set_xlim(bnds[0], bnds[2])
+    ax.set_ylim(bnds[1], bnds[3])
+
+    providers = [
+        ("CartoDB Positron", ctx.providers.CartoDB.Positron),
+        ("CartoDB Voyager", ctx.providers.CartoDB.Voyager),
+        ("Esri WorldGrayCanvas", ctx.providers.Esri.WorldGrayCanvas),
+    ]
+    for name, prov in providers:
+        try:
+            ctx.add_basemap(ax, source=prov, zoom=5, attribution=False)
+            print(f"  inset basemap: {name}")
+            break
+        except Exception as exc:
+            print(f"  inset basemap {name} failed ({type(exc).__name__}); trying next")
+    else:
+        print("  no inset basemap available; drawing a plain locator box")
+        ax.set_facecolor("#EEF3F7")
+
+    marker = gpd.GeoSeries(
+        [box(*aoi_bounds)], crs="EPSG:4326").to_crs(epsg=3857)
+    # At this scale the AOI is sub-pixel, so mark it with a visible symbol too.
+    marker.boundary.plot(ax=ax, color="red", linewidth=1.6)
+    c = marker.geometry.iloc[0].centroid
+    ax.plot(c.x, c.y, marker="o", markersize=7, markerfacecolor="none",
+            markeredgecolor="red", markeredgewidth=1.6)
+    ax.annotate("UCPS", xy=(c.x, c.y), xytext=(14, -20),
+                textcoords="offset points", fontsize=8, fontweight="bold",
+                color="red",
+                arrowprops=dict(arrowstyle="-", color="red", lw=0.9))
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for sp in ax.spines.values():
+        sp.set_linewidth(0.6)
+
+
+def h3_to_polygon(cell: str) -> Polygon:
+    bnd = h3.cell_to_boundary(cell)
+    return Polygon([(lon, lat) for lat, lon in bnd])
+
+
+def load_cells():
+    """H3 cells and occupancy, taken from the analysis output so counts stay current."""
+    df = pd.read_csv("h3_analysis.csv")
+    gdf = gpd.GeoDataFrame(
+        df.copy(),
+        geometry=[h3_to_polygon(c) for c in df["h3_index"]],
+        crs="EPSG:4326",
+    )
+    occ = gdf[gdf["total_records"] > 0]
+    print(f"  Occupied cells: {len(occ)} of {len(gdf)}")
+    return gdf, occ
 
 
 def main():
-    # Load data
-    print("Loading data...")
-    aoi = gpd.read_file("aoi.gpkg")
-    h3_cells = gpd.read_file("REEPS_GridAnalyses.gpkg", layer="h3_all_cells")
-    reeps_occ = gpd.read_file("REEPS_Master_Database.gpkg", layer="reeps_occurrences")
+    aoi = gpd.read_file("aoi.gpkg").to_crs(DST_CRS)
+    gdf_all, gdf_occ = load_cells()
+    img, extent = load_basemap()
 
-    # Get occupied cells (column uses 1/0 integers, or "Yes"/"No" strings)
-    if h3_cells["Occupied"].dtype == object:
-        occupied_cells = h3_cells[h3_cells["Occupied"] == "Yes"]
-    else:
-        occupied_cells = h3_cells[h3_cells["Occupied"] == 1]
-    print(f"  Occupied cells: {len(occupied_cells)} of {len(h3_cells)}")
+    mpl.rcParams.update({
+        "font.family": "sans-serif",
+        "font.sans-serif": ["Arial", "DejaVu Sans"],
+        "font.size": 9,
+        "figure.dpi": 300,
+        "savefig.dpi": 300,
+    })
 
-    # Project to UTM Zone 48S for correct axis labels
-    aoi_utm = aoi.to_crs(UTM_CRS)
-    h3_utm = h3_cells.to_crs(UTM_CRS)
-    occ_utm = occupied_cells.to_crs(UTM_CRS)
+    b = aoi.total_bounds
+    pad_x = (b[2] - b[0]) * 0.02
+    pad_y = (b[3] - b[1]) * 0.02
+    xmin, xmax = b[0] - pad_x, b[2] + pad_x
+    ymin, ymax = b[1] - pad_y, b[3] + pad_y
 
-    # AOI bounds in UTM
-    aoi_bounds = aoi_utm.total_bounds  # minx, miny, maxx, maxy
+    fig = plt.figure(figsize=(12, 9.2), facecolor="white")
+    ax = fig.add_axes([0.08, 0.07, 0.90, 0.785])
 
-    # Create figure with main map and inset
-    fig = plt.figure(figsize=(12, 10))
+    ax.set_xlim(xmin, xmax)
+    ax.set_ylim(ymin, ymax)
+    ax.set_aspect(1.0 / np.cos(np.radians(abs((ymin + ymax) / 2))))
 
-    # Main map axes
-    ax_main = fig.add_axes([0.1, 0.1, 0.85, 0.85])  # [left, bottom, width, height]
-
-    # Set extent for main map (UTM Zone 48S)
-    ax_main.set_xlim(aoi_bounds[0], aoi_bounds[2])
-    ax_main.set_ylim(aoi_bounds[1], aoi_bounds[3])
-
-    # Sentinel-2 RGB basemap (s2cloudless)
-    s2_tiles = TileProvider(
-        name="Sentinel-2 cloudless",
-        url="https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless-2020_3857/default/g/{z}/{y}/{x}.jpg",
-        attribution="Sentinel-2 cloudless (EOX)",
-    )
-    ctx.add_basemap(ax_main, source=s2_tiles, zoom=13, crs=UTM_CRS)
-
-    # Plot H3 grid with transparency - all cells first (underneath)
-    h3_utm.plot(ax=ax_main, facecolor="lightgray", alpha=0.15, edgecolor="gray",
-                linewidth=0.4, zorder=2)
-
-    # Occupied cells with REEPS records - clearly visible blue fill
-    occ_utm.plot(ax=ax_main, facecolor="#3388ff", alpha=0.45, edgecolor="#1a5cb5",
+    ax.imshow(img, extent=extent, origin="upper", interpolation="bilinear", zorder=0)
+    gdf_all.plot(ax=ax, facecolor="white", alpha=0.10, edgecolor="white",
+                 linewidth=0.4, zorder=2)
+    gdf_occ.plot(ax=ax, facecolor="#3388ff", alpha=0.40, edgecolor="#1a5cb5",
                  linewidth=1.0, zorder=3)
+    aoi.boundary.plot(ax=ax, linewidth=2.2, color="red", linestyle="--", zorder=10)
 
-    # Plot AOI boundary ON TOP with dashed red line (clearly visible)
-    if not aoi_utm.empty:
-        aoi_utm.boundary.plot(ax=ax_main, linewidth=2.5, color="red",
-                              linestyle="--", zorder=10)
-
-    # Add gridlines
-    ax_main.grid(True, alpha=0.2, linestyle="--")
-
-    # Force full numeric tick labels (no abbreviation)
-    ax_main.xaxis.set_major_formatter(FuncFormatter(lambda x, pos: f"{int(x):d}"))
-    ax_main.yaxis.set_major_formatter(FuncFormatter(lambda y, pos: f"{int(y):d}"))
-
-    # Labels
-    ax_main.set_xlabel("Easting (m)", fontsize=12)
-    ax_main.set_ylabel("Northing (m)", fontsize=12)
-    ax_main.set_title(
-        "Study Area: Upper Cisokan Pumped Storage (UCPS), West Java, Indonesia",
-        fontsize=14,
-        fontweight="bold",
-        pad=10,
-    )
+    # Geographic coordinates in degrees / minutes / seconds (Reviewer 2, comment 6)
+    ax.xaxis.set_major_formatter(FuncFormatter(lambda v, p: dms(v, "lon")))
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, p: dms(v, "lat")))
+    ax.set_xticks(np.linspace(xmin, xmax, 6))
+    ax.set_yticks(np.linspace(ymin, ymax, 5))
+    ax.tick_params(labelsize=8)
+    plt.setp(ax.get_xticklabels(), rotation=0)
+    ax.grid(True, alpha=0.25, linestyle="--", linewidth=0.5, color="white")
+    ax.set_xlabel("Longitude", fontsize=10)
+    ax.set_ylabel("Latitude", fontsize=10)
 
     # North arrow
-    ax_main.annotate(
-        "N",
-        xy=(0.95, 0.95),
-        xycoords="axes fraction",
-        fontsize=14,
-        ha="center",
-        fontweight="bold",
-    )
-    ax_main.annotate(
-        "↑", xy=(0.95, 0.93), xycoords="axes fraction", fontsize=18, ha="center"
-    )
+    ax.annotate("", xy=(0.965, 0.955), xytext=(0.965, 0.895),
+                xycoords="axes fraction",
+                arrowprops=dict(arrowstyle="-|>", color="white", lw=1.6))
+    ax.text(0.965, 0.960, "N", transform=ax.transAxes, fontsize=11,
+            fontweight="bold", color="white", ha="center", va="bottom")
 
-    # Scale bar (approximate) - 2 km
-    scale_length = 2000  # meters
-    x0 = aoi_bounds[0] + (aoi_bounds[2] - aoi_bounds[0]) * 0.05
-    y0 = aoi_bounds[1] + (aoi_bounds[3] - aoi_bounds[1]) * 0.07
-    ax_main.plot([x0, x0 + scale_length], [y0, y0], "k-", linewidth=2)
-    ax_main.plot([x0, x0], [y0, y0 - 200], "k-", linewidth=2)
-    ax_main.plot(
-        [x0 + scale_length, x0 + scale_length], [y0, y0 - 200], "k-", linewidth=2
-    )
-    ax_main.text(x0 + scale_length / 2, y0 - 500, "2 km", ha="center", fontsize=9)
+    # Scale bar, 2 km, in degrees of longitude at this latitude
+    lat_mid = (ymin + ymax) / 2
+    deg_per_km = 1.0 / (111.32 * np.cos(np.radians(abs(lat_mid))))
+    blen = 2 * deg_per_km
+    bx = xmin + (xmax - xmin) * 0.04
+    by = ymin + (ymax - ymin) * 0.06
+    ax.plot([bx, bx + blen], [by, by], "-", color="white", lw=3,
+            solid_capstyle="butt", zorder=11)
+    for xe in (bx, bx + blen):
+        ax.plot([xe, xe], [by, by + (ymax - ymin) * 0.012], "-", color="white",
+                lw=3, zorder=11)
+    ax.text(bx + blen / 2, by + (ymax - ymin) * 0.018, "2 km", ha="center",
+            fontsize=8.5, color="white", fontweight="bold", zorder=11)
 
-    # CRS / Datum note
-    ax_main.text(
-        0.99,
-        0.02,
-        "CRS: WGS 84 / UTM zone 48S (EPSG:32748)",
-        transform=ax_main.transAxes,
-        fontsize=8,
-        ha="right",
-        va="bottom",
-        color="black",
-        bbox=dict(
-            boxstyle="round,pad=0.2", facecolor="white", alpha=0.7, edgecolor="none"
-        ),
-    )
+    ax.text(0.99, 0.015,
+            "Basemap: Sentinel-2 (S2DR3 super-resolved, 30 Sep 2024) · "
+            "CRS: WGS 84 (EPSG:4326)",
+            transform=ax.transAxes, fontsize=7.5, ha="right", va="bottom",
+            color="black",
+            bbox=dict(boxstyle="round,pad=0.25", facecolor="white", alpha=0.75,
+                      edgecolor="none"), zorder=11)
 
-    # Legend for main map (colors match actual plot)
     legend_elements = [
-        mpatches.Patch(
-            facecolor="#3388ff",
-            alpha=0.45,
-            edgecolor="#1a5cb5",
-            linewidth=1.0,
-            label=f"H3 cells with REEPS records (n={len(occ_utm)})",
-        ),
-        mpatches.Patch(
-            facecolor="lightgray",
-            alpha=0.15,
-            edgecolor="gray",
-            linewidth=0.4,
-            label=f"All H3 cells (n={len(h3_utm)})",
-        ),
-        mpatches.Patch(
-            facecolor="none", edgecolor="red", linewidth=2,
-            linestyle="--", label="AOI boundary"
-        ),
+        mpatches.Patch(facecolor="#3388ff", alpha=0.40, edgecolor="#1a5cb5",
+                       linewidth=1.0,
+                       label=f"H3 cells with REEPS records (n = {len(gdf_occ)})"),
+        mpatches.Patch(facecolor="white", alpha=0.30, edgecolor="white",
+                       linewidth=0.4,
+                       label=f"All H3 cells in AOI (n = {len(gdf_all)})"),
+        mpatches.Patch(facecolor="none", edgecolor="red", linewidth=2,
+                       linestyle="--", label="AOI boundary"),
     ]
-    ax_main.legend(
-        handles=legend_elements, loc="lower left", fontsize=9, framealpha=0.9
-    )
+    ax.legend(handles=legend_elements, loc="lower right", fontsize=8.5,
+              framealpha=0.9, bbox_to_anchor=(1.0, 0.055))
 
-    # ============ INSET MAP ============
-    # Create inset showing regional context (Java, Sumatera, Kalimantan, Bali)
-    ax_inset = fig.add_axes([0.02, 0.55, 0.25, 0.30])  # [left, bottom, width, height]
+    ax.text(0.012, 0.982, "(b)  Study area",
+            transform=ax.transAxes, fontsize=10.5, fontweight="bold",
+            color="black", va="top", ha="left", zorder=12,
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.85,
+                      edgecolor="none"))
 
-    # Extent to cover Sumatera, Kalimantan, Java, Bali (lon/lat)
-    inset_lon_min, inset_lon_max = 95, 120
-    inset_lat_min, inset_lat_max = -10, 7
+    # ── Regional inset, in its own band above the map so it covers no data ─────
+    ax_in = fig.add_axes([0.08, 0.875, 0.30, 0.105])
+    _regional_inset(ax_in, b)
+    ax_in.set_title("(a)  Regional context", fontsize=9.5, fontweight="bold",
+                    loc="left", pad=3)
+    fig.text(0.40, 0.925,
+             "Upper Cisokan Pumped Storage (UCPS), West Java, Indonesia",
+             fontsize=12, fontweight="bold", va="center")
 
-    inset_bounds_3857 = (
-        gpd.GeoSeries(
-            [box(inset_lon_min, inset_lat_min, inset_lon_max, inset_lat_max)],
-            crs="EPSG:4326",
-        )
-        .to_crs(epsg=3857)
-        .total_bounds
-    )
-
-    ax_inset.set_xlim(inset_bounds_3857[0], inset_bounds_3857[2])
-    ax_inset.set_ylim(inset_bounds_3857[1], inset_bounds_3857[3])
-
-    # Add OSM background for inset
-    ctx.add_basemap(ax_inset, source=ctx.providers.OpenStreetMap.Mapnik, zoom=5)
-
-    # Add box for the AOI extent
-    aoi_box = gpd.GeoSeries(
-        [box(LON_MIN, LAT_MIN, LON_MAX, LAT_MAX)],
-        crs="EPSG:4326",
-    ).to_crs(epsg=3857)
-    aoi_box.boundary.plot(ax=ax_inset, color="red", linewidth=2)
-
-    ax_inset.axis("off")
-    ax_inset.set_title(
-        "(a) Regional context", fontsize=10, fontweight="bold", loc="left"
-    )
-
-    # Add label for main map
-    ax_main.text(
-        0.02,
-        0.98,
-        "(b) Study area",
-        transform=ax_main.transAxes,
-        fontsize=10,
-        fontweight="bold",
-        va="top",
-    )
-
-    plt.tight_layout()
-
-    # Save
-    output_path = "figures/fig1_study_area_new.pdf"
-    plt.savefig(output_path, dpi=300, bbox_inches="tight", facecolor="white")
-    plt.savefig(
-        output_path.replace(".pdf", ".png"),
-        dpi=300,
-        bbox_inches="tight",
-        facecolor="white",
-    )
-    print(f"Saved: {output_path}")
-
-    # Also save as fig1_study_area for direct use
-    import shutil
-
-    shutil.copy(output_path, "figures/fig1_study_area.pdf")
-    shutil.copy(output_path.replace(".pdf", ".png"), "figures/fig1_study_area.png")
-    print("Updated fig1_study_area in figures/")
-
-    plt.close()
+    out = "figures/fig1_study_area.pdf"
+    fig.savefig(out, bbox_inches="tight", facecolor="white")
+    fig.savefig(out.replace(".pdf", ".png"), bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    print(f"Saved: {out}")
 
 
 if __name__ == "__main__":

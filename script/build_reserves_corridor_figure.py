@@ -133,7 +133,7 @@ def main() -> None:
 
     # ── Panel B ─────────────────────────────────────────────────────────────
     try:
-        from basemap_utils import S2_RGBA, S2_EXTENT
+        from basemap_utils import S2_RGBA, S2_EXTENT, add_graticule
         have_bm = True
     except Exception as e:                                  # pragma: no cover
         print(f"  basemap unavailable ({e}); drawing without it")
@@ -169,7 +169,12 @@ def main() -> None:
     axB.set_ylim(b[1] - pady, b[3] + pady)
     axB.set_title("(b)  Conservation priority and corridor cells",
                   loc="left", pad=6, weight="bold")
-    axB.set_xticks([]); axB.set_yticks([])
+    # Panel B is geographic (EPSG:4326) over the Sentinel-2 scene, so it carries a
+    # coordinate graticule. Panel A is in a projected CRS and uses a scale bar.
+    if have_bm:
+        add_graticule(axB, nx=3, ny=3, fontsize=6.0)
+    else:
+        axB.set_xticks([]); axB.set_yticks([])
     for s in axB.spines.values():
         s.set_edgecolor("#9E9E9E")
 

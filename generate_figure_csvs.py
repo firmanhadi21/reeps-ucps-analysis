@@ -37,19 +37,25 @@ MASTER_GPKG = os.path.join(BASE, 'REEPS_Master_Database.gpkg')
 
 # The 11 species reported in Table 1 of the manuscript. This is the analysed
 # set: filtering the master occurrences to it yields exactly 493 records across
-# 39 occupied H3 cells, matching every per-species value in that table.
+# 38 occupied H3 cells, matching every per-species value in that table.
 # ── Data corrections ──────────────────────────────────────────────────────────
-# Record No. 366 was
-# transcribed with a longitude ~6 degrees west of the AOI — a 7->1 typo in the
-# third digit that placed it 667 km west of the AOI, in the sea off Sumatra.
-# The same survey locality appears in a later survey year at the corrected
-# longitude, with latitude agreeing to three decimals. The value here is rounded
-# for public release because the record is of a Critically Endangered taxon; the
-# unrounded correction is held with the source database.
+# Record No. 366 was transcribed with a longitude of 101.150156 — a 7->1 typo in
+# the third digit that placed it roughly 667 km west of the AOI, in the sea off
+# Sumatra. The same survey locality is recorded in a later survey year at the
+# longitude below, with latitude agreeing to three decimal places, which both
+# identifies the error and fixes the correction.
+#
 # Left uncorrected, this single record adds a spurious 39th "occupied" cell and
 # breaks the single-contiguous-patch result reported in the manuscript.
+#
+# The species and locality are deliberately not named here. The record is of a
+# Critically Endangered taxon subject to illegal collection, and the published
+# Data Availability statement makes localities available from the authors on
+# reasonable request. The full provenance, including the audit trail for this
+# correction, is in docs/DATA_AUDIT_2026-08-12.md in the private working
+# repository.
 COORDINATE_CORRECTIONS = {
-    366: {"Longitude": 107.221},   # rounded to ~110 m for public release
+    366: {"Longitude": 107.221116},
 }
 
 # The same typo also pulled its H3 cell into the AOI grid. That hexagon lies far

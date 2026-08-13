@@ -64,7 +64,7 @@ from basemap_utils import (
     UNOCC_COLOR, UNOCC_ALPHA, AOI_COLOR, AOI_LW, FIG_W, FIG_H,
     h3_to_polygon, setup_ax, add_basemap, draw_hex_base,
     add_north_arrow, add_scalebar, add_subtitle, s2_patch, aoi_handle,
-    unocc_handle, save_fig, aoi, std_colorbar
+    unocc_handle, save_fig, aoi, std_colorbar, add_graticule
 )
 
 # ── Output directory ───────────────────────────────────────────────────────
@@ -398,12 +398,13 @@ PANEL_TITLES = [
     "(d)  Recent Activity (2024 vs Prior)",
 ]
 
-for ax in axes.flat:
+for _gi, ax in enumerate(axes.flat):
     ax.set_xlim(XMIN, XMAX)
     ax.set_ylim(YMIN, YMAX)
     ax.set_aspect("equal")
     ax.set_facecolor("none")
-    ax.tick_params(left=False, bottom=False, labelleft=False, labelbottom=False)
+    add_graticule(ax, xlabels=_gi >= 2, ylabels=_gi % 2 == 0,
+                  fontsize=6.0)
     for sp in ax.spines.values():
         sp.set_edgecolor("#AAAAAA")
         sp.set_linewidth(0.5)

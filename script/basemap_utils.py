@@ -39,6 +39,7 @@ import matplotlib.colors as mcolors
 import matplotlib.patheffects as pe
 from matplotlib.lines import Line2D
 from matplotlib.colorbar import ColorbarBase
+from matplotlib.ticker import FuncFormatter
 from shapely.geometry import Polygon
 from pathlib import Path
 import h3
@@ -188,17 +189,73 @@ XMAX, YMAX = _ab[2] + _px, _ab[3] + _py
 # ══════════════════════════════════════════════════════════════════════════════
 # Shared drawing functions
 # ══════════════════════════════════════════════════════════════════════════════
-def setup_ax(fig, rect=(0.02, 0.02, 0.78, 0.96)):
+# ── Coordinate graticule ──────────────────────────────────────────────────────
+# Axes are in geographic degrees (EPSG:4326), so ticks can be labelled directly.
+# Steps are whole arc-minutes, chosen so labels stay short and round.
+_GRAT_STEPS_ARCMIN = (1, 2, 5, 10, 15, 30, 60)
+
+
+def dms(value, axis):
+    """Signed decimal degrees -> degrees/minutes(/seconds) with a hemisphere suffix."""
+    hemi = ("N" if value >= 0 else "S") if axis == "lat" else ("E" if value >= 0 else "W")
+    v = abs(value)
+    total_sec = round(v * 3600)
+    d, rem = divmod(total_sec, 3600)
+    m, s = divmod(rem, 60)
+    if s:
+        return f"{d}°{m:02d}'{s:02d}\"{hemi}"
+    return f"{d}°{m:02d}'{hemi}"
+
+
+def _nice_ticks(lo, hi, target):
+    """Tick positions on whole arc-minute multiples, roughly `target` of them."""
+    span_min = (hi - lo) * 60.0
+    step = min(_GRAT_STEPS_ARCMIN,
+               key=lambda s: abs(span_min / s - target))
+    step_deg = step / 60.0
+    first = np.ceil(lo / step_deg) * step_deg
+    ticks = np.arange(first, hi + step_deg * 1e-6, step_deg)
+    return ticks[(ticks >= lo) & (ticks <= hi)]
+
+
+def add_graticule(ax, nx=3, ny=3, xlabels=True, ylabels=True, fontsize=6.5):
+    """Draw a labelled lat/lon graticule over an imagery basemap.
+
+    Imagery panels previously carried no coordinates at all, which makes a map
+    hard to locate on the ground (Reviewer 2, comment 6). Grid lines are white so
+    they read against the dark forest canopy that dominates the scene.
+    """
+    x0, x1 = ax.get_xlim()
+    y0, y1 = ax.get_ylim()
+    ax.set_xticks(_nice_ticks(x0, x1, nx))
+    ax.set_yticks(_nice_ticks(y0, y1, ny))
+    ax.xaxis.set_major_formatter(FuncFormatter(lambda v, p: dms(v, "lon")))
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, p: dms(v, "lat")))
+    ax.tick_params(left=True, bottom=True,
+                   labelleft=ylabels, labelbottom=xlabels,
+                   labelsize=fontsize, length=2.5, width=0.5, pad=1.5,
+                   colors="#333333")
+    ax.grid(True, linestyle=":", linewidth=0.45, color="white",
+            alpha=0.55, zorder=4)
+    return ax
+
+
+def setup_ax(fig, rect=(0.02, 0.02, 0.78, 0.96), graticule=True):
     ax = fig.add_axes(rect)
     ax.set_xlim(XMIN, XMAX)
     ax.set_ylim(YMIN, YMAX)
     ax.set_aspect("equal")
     ax.set_facecolor("none")
-    ax.tick_params(left=False, bottom=False, labelleft=False, labelbottom=False)
     for sp in ax.spines.values():
         sp.set_edgecolor("#888888")
         sp.set_linewidth(0.5)
-    ax.grid(True, linestyle=":", linewidth=0.2, color="#BBBBBB", alpha=0.4, zorder=1)
+    if graticule:
+        add_graticule(ax)
+    else:
+        ax.tick_params(left=False, bottom=False,
+                       labelleft=False, labelbottom=False)
+        ax.grid(True, linestyle=":", linewidth=0.2, color="#BBBBBB",
+                alpha=0.4, zorder=1)
     return ax
 
 

@@ -26,6 +26,28 @@ Supporting scripts: `compute_h3_resolution_comparison.py` (evidence for the
 resolution choice), `prepare_data_release.py` (builds an aggregated data package),
 and `script/build_*.py` (figures).
 
+Analyses reported in the supplementary material have their own scripts:
+`compute_morans_i.py` (global Moran's I), `compute_lisa.py` (LISA, with a fixed
+permutation seed and a report of the seed sensitivity) and
+`compute_accumulation_rarefaction.py` (species accumulation and rarefaction).
+
+## Derived geopackages
+
+`build_geopackages.py` writes `REEPS_Master_Database_v2.gpkg` and
+`REEPS_GridAnalyses_v2.gpkg` from the CSV outputs of the pipeline, so the spatial
+layers are always regenerated from the analysed set rather than maintained by
+hand. Every script here reads the `_v2` packages.
+
+## Rebuilding the figures
+
+`python rebuild_all_figures.py` regenerates the geopackages and all sixteen
+manuscript figures in dependency order, then copies each multi-panel composite to
+the filename the manuscript references. That copy step matters: several builders
+write into `static_figures/` or `diversity_figures/` under their own names, and a
+figure regenerated but not copied is how a stale panel survives a rebuild.
+
+It does not re-run the CSV pipeline above; run that first if the inputs changed.
+
 **All four stages require the occurrence database**, which is not distributed
 here. Running the pipeline therefore requires obtaining the data first.
 

@@ -52,6 +52,7 @@ import matplotlib.colors as mcolors
 import matplotlib.patheffects as pe
 from matplotlib.colorbar import ColorbarBase
 from matplotlib.lines import Line2D
+from matplotlib.ticker import FuncFormatter
 from matplotlib_scalebar.scalebar import ScaleBar
 from shapely.geometry import Polygon
 from pathlib import Path
@@ -184,19 +185,58 @@ AOI_LW        = 1.8
 OCC_ALPHA     = 0.65        # transparency for occupied cells
 
 
+# ── Coordinate graticule ──────────────────────────────────────────────────────
+# Kept local rather than imported from basemap_utils, because importing that module
+# loads a second, larger copy of the Sentinel-2 scene as a side effect.
+_GRAT_STEPS_ARCMIN = (1, 2, 5, 10, 15, 30, 60)
+
+
+def dms(value, axis):
+    """Signed decimal degrees -> degrees/minutes(/seconds) with a hemisphere suffix."""
+    hemi = ("N" if value >= 0 else "S") if axis == "lat" else ("E" if value >= 0 else "W")
+    total_sec = round(abs(value) * 3600)
+    d, rem = divmod(total_sec, 3600)
+    m, s = divmod(rem, 60)
+    return f"{d}°{m:02d}'{s:02d}\"{hemi}" if s else f"{d}°{m:02d}'{hemi}"
+
+
+def _nice_ticks(lo, hi, target):
+    """Tick positions on whole arc-minute multiples, roughly `target` of them."""
+    span_min = (hi - lo) * 60.0
+    step = min(_GRAT_STEPS_ARCMIN, key=lambda s: abs(span_min / s - target))
+    step_deg = step / 60.0
+    ticks = np.arange(np.ceil(lo / step_deg) * step_deg,
+                      hi + step_deg * 1e-6, step_deg)
+    return ticks[(ticks >= lo) & (ticks <= hi)]
+
+
+def add_graticule(ax, nx=3, ny=3, xlabels=True, ylabels=True, fontsize=6.5):
+    """Labelled lat/lon graticule over the imagery basemap."""
+    x0, x1 = ax.get_xlim()
+    y0, y1 = ax.get_ylim()
+    ax.set_xticks(_nice_ticks(x0, x1, nx))
+    ax.set_yticks(_nice_ticks(y0, y1, ny))
+    ax.xaxis.set_major_formatter(FuncFormatter(lambda v, p: dms(v, "lon")))
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, p: dms(v, "lat")))
+    ax.tick_params(left=True, bottom=True,
+                   labelleft=ylabels, labelbottom=xlabels,
+                   labelsize=fontsize, length=2.5, width=0.5, pad=1.5,
+                   colors="#333333")
+    ax.grid(True, linestyle=":", linewidth=0.45, color="white",
+            alpha=0.55, zorder=4)
+    return ax
+
+
 def setup_ax(fig, rect=(0.02, 0.02, 0.78, 0.96)):
     ax = fig.add_axes(rect)
     ax.set_xlim(XMIN, XMAX)
     ax.set_ylim(YMIN, YMAX)
     ax.set_aspect("equal")
     ax.set_facecolor("none")   # transparent — basemap image handles background
-    ax.tick_params(left=False, bottom=False,
-                   labelleft=False, labelbottom=False)
     for spine in ax.spines.values():
         spine.set_edgecolor("#888888")
         spine.set_linewidth(0.5)
-    # Faint grid graticule
-    ax.grid(True, linestyle=":", linewidth=0.2, color="#BBBBBB", alpha=0.4, zorder=1)
+    add_graticule(ax)
     return ax
 
 
@@ -565,19 +605,19 @@ PANEL_TITLES = [
     "(a)  Species Richness (S)",
     "(b)  Shannon Entropy (H′)",
     "(c)  Simpson's Diversity (D)",
-    "(d)  Shannon Diversity Trend",
+    "(d)  Survey Effort (records per cell)",
 ]
 
-for ax in axes.flat:
+for _gi, ax in enumerate(axes.flat):
     ax.set_xlim(XMIN, XMAX)
     ax.set_ylim(YMIN, YMAX)
     ax.set_aspect("equal")
     ax.set_facecolor("none")    # basemap handles background
-    ax.tick_params(left=False, bottom=False, labelleft=False, labelbottom=False)
     for sp in ax.spines.values():
         sp.set_edgecolor("#AAAAAA")
         sp.set_linewidth(0.5)
-    ax.grid(True, linestyle=":", linewidth=0.2, color="#BBBBBB", alpha=0.4, zorder=1)
+    # Labels on the outer panels only: x on the bottom row, y on the left column.
+    add_graticule(ax, xlabels=_gi >= 2, ylabels=_gi % 2 == 0, fontsize=6.0)
     # Basemap
     ax.imshow(lc_rgba, extent=LC_EXTENT, origin="upper", aspect="equal",
               interpolation="bilinear", zorder=0)
@@ -616,22 +656,19 @@ occ_gdf.plot(ax=ax2, color=occ_gdf["_c"].tolist(),
 cax2 = fig.add_axes([0.48, 0.08, 0.012, 0.36])
 ColorbarBase(cax2, cmap=cmap_D, norm=norm_D, orientation="vertical").set_label("D", fontsize=8)
 
-# Panel D — Trend
+# Panel D — Survey effort. Shown beside the diversity panels so that the reader can
+# judge how far the richness and entropy patterns track sampling rather than ecology.
 ax3 = axes[1, 1]
-for trend, color in TREND_COLORS.items():
-    sub = occ_gdf[occ_gdf["diversity_trend"] == trend]
-    if len(sub):
-        sub.plot(ax=ax3, color=color, edgecolor=BORDER_COLOR,
-                 linewidth=0.3, alpha=OCC_ALPHA, zorder=3)
-trend_handles = [
-    mpatches.Patch(fc=c, ec=BORDER_COLOR, alpha=OCC_ALPHA,
-                   label=f"{l} (n={trend_counts.get(l, 0)})")
-    for l, c in TREND_COLORS.items()
-]
-trend_handles.append(mpatches.Patch(fc=UNOCC_COLOR, ec=BORDER_COLOR, alpha=0.4,
-                                     label="Unoccupied"))
-ax3.legend(handles=trend_handles, loc="upper left", fontsize=7, framealpha=0.85,
-           edgecolor="#CCC", handlelength=1.2)
+cmap_R = mpl.colormaps["Purples"]
+R_max  = int(occ_gdf["total_records"].max())
+norm_R = mcolors.Normalize(vmin=0, vmax=R_max)
+occ_gdf["_c"] = occ_gdf["total_records"].apply(
+    lambda v: mcolors.to_hex(cmap_R(norm_R(v))) if pd.notna(v) else "#FFFFFF")
+occ_gdf.plot(ax=ax3, color=occ_gdf["_c"].tolist(),
+             edgecolor=BORDER_COLOR, linewidth=0.3, alpha=OCC_ALPHA, zorder=3)
+cax3 = fig.add_axes([0.92, 0.08, 0.012, 0.36])
+ColorbarBase(cax3, cmap=cmap_R, norm=norm_R,
+             orientation="vertical").set_label("records", fontsize=8)
 
 # Titles, scalebars, north arrows on each panel
 for i, (ax, title) in enumerate(zip(axes.flat, PANEL_TITLES)):

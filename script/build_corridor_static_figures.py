@@ -340,7 +340,8 @@ for ax_idx, (row, col) in enumerate([(0, 0), (0, 1), (1, 0), (1, 1)]):
     ax.set_ylim(YMIN, YMAX)
     ax.set_aspect("equal")
     ax.set_facecolor("none")
-    ax.tick_params(left=False, bottom=False, labelleft=False, labelbottom=False)
+    add_graticule(ax, xlabels=ax_idx >= 2, ylabels=ax_idx % 2 == 0,
+                  fontsize=6.0)
     for sp in ax.spines.values():
         sp.set_edgecolor("#888888")
         sp.set_linewidth(0.5)

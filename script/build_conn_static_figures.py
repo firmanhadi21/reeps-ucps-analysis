@@ -2,10 +2,10 @@
 build_conn_static_figures.py
 ────────────────────────────
 Generate four publication-ready static maps from the REEPS Connectivity Map:
-  Fig A — Cell Type (Core/Connected/Isolated/Unknown)
+  Fig A — Structural position (Interior/Edge/Isolated)
   Fig B — Isolation Distance (km to nearest occupied cell)
   Fig C — Patch Size (number of contiguous occupied cells)
-  Fig D — Ecological Importance & Keystone Status
+  Fig D — Occupied neighbours & keystone status
   Fig E — 4-panel composite
 
 Each figure uses the Sentinel-2 true-colour basemap (30 Sep 2024) as background
@@ -64,7 +64,7 @@ from basemap_utils import (
     UNOCC_COLOR, UNOCC_ALPHA, AOI_COLOR, AOI_LW, FIG_W, FIG_H,
     h3_to_polygon, setup_ax, add_basemap, draw_hex_base,
     add_north_arrow, add_scalebar, add_subtitle, s2_patch, aoi_handle,
-    unocc_handle, save_fig, aoi, std_colorbar
+    unocc_handle, save_fig, aoi, std_colorbar, add_graticule
 )
 
 from shapely.geometry import Polygon
@@ -87,10 +87,21 @@ gdf_all   = gpd.GeoDataFrame(df_h.copy(), geometry=geoms, crs="EPSG:4326")
 # Merge connectivity data (only columns that exist in the file)
 # Actual columns: h3_index, cell_type, occupied, patch_id, occ_nbrs, k2_occ_nbrs, sp_reachable_k2, eco_score
 conn_cols = ["h3_index", "occupied", "patch_id", "occ_nbrs",
-             "k2_occ_nbrs", "cell_type"]
+             "k2_occ_nbrs", "cell_type", "structural_class", "keystone"]
 conn_cols = [c for c in conn_cols if c in df_conn.columns]
+
+# h3_analysis.csv carries its own copies of several connectivity columns, left over
+# from an earlier pipeline run. Merging without dropping them first suffixes the
+# *fresh* values as `_conn` and silently leaves the stale ones in place — which is
+# how this figure came to report a 40-cell main patch against 38 occupied cells.
+# The connectivity file is authoritative for these columns.
+stale = [c for c in conn_cols if c != "h3_index" and c in gdf_all.columns]
+if stale:
+    print(f"  dropping stale columns from h3_analysis: {stale}")
+    gdf_all = gdf_all.drop(columns=stale)
+
 gdf_all = gdf_all.merge(df_conn[conn_cols], on="h3_index", how="left",
-                         suffixes=("", "_conn"))
+                         validate="one_to_one")
 
 # Derive patch_size from patch_id (count cells per patch)
 if "patch_id" in gdf_all.columns:
@@ -113,16 +124,18 @@ try:
     prio_cols = ["h3_index", "Connectivity", "Priority_Tier"]
     prio_cols = [c for c in prio_cols if c in df_prio.columns]
     gdf_all = gdf_all.merge(df_prio[prio_cols], on="h3_index", how="left")
-    # Map Connectivity -> ecological_importance, Priority_Tier top -> is_keystone
-    if "Connectivity" in gdf_all.columns:
-        gdf_all["ecological_importance"] = gdf_all["Connectivity"]
-    if "Priority_Tier" in gdf_all.columns:
-        gdf_all["is_keystone"] = gdf_all["Priority_Tier"].str.lower().str.contains("tier 1", na=False)
 except Exception as e:
     print(f"  Warning: Could not merge priority_index: {e}")
 
+# Keystone status comes from the connectivity analysis — cells whose removal
+# disconnects the occupied patch. An earlier version derived it by searching
+# Priority_Tier for the string "tier 1", which never matches: the tiers are
+# CRITICAL/HIGH/MEDIUM/LOW, so no cell was ever marked keystone.
+gdf_all["is_keystone"] = gdf_all.get(
+    "keystone", pd.Series(False, index=gdf_all.index)).fillna(0).astype(bool)
+
 # Ensure required columns exist with defaults
-for col, default in [("ecological_importance", 0.0), ("is_keystone", False), ("cell_type", "Unknown")]:
+for col, default in [("is_keystone", False), ("cell_type", "Unknown")]:
     if col not in gdf_all.columns:
         gdf_all[col] = default
 
@@ -134,43 +147,48 @@ print(f"  All {len(gdf_all)} cells loaded, {occ_mask.sum()} occupied")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# FIGURE A — Cell Type (Core/Connected/Isolated/Unknown)
+# FIGURE A — Structural position (Interior/Edge/Isolated)
 # ══════════════════════════════════════════════════════════════════════════════
 print("\n[1/5] Cell Type …")
 
 CELLTYPE_COLORS = {
-    "Core":      "#1565C0",   # dark blue — high contrast on green basemap
-    "Connected": "#64B5F6",   # light blue
+    "Interior":  "#1565C0",   # dark blue — high contrast on green basemap
+    "Edge":      "#64B5F6",   # light blue
     "Isolated":  "#FF6F00",   # orange
     "Unknown":   "#B0BEC5",   # grey
 }
 
 def infer_cell_type(row):
-    """Derive cell type from connectivity data if not in priority_index."""
-    # cell_type from h3_connectivity_full.csv (via _conn suffix if duplicated)
-    ct = row.get("cell_type_conn") if "cell_type_conn" in row.index else row.get("cell_type")
-    if pd.notna(ct) and ct not in ("Unknown", "Empty", "Occupied"):
-        return ct
+    """Structural position of an occupied cell.
 
-    if row.get("is_isolated") == True:
-        return "Isolated"
-    if row.get("occ_nbrs", 0) >= 2:
-        return "Core"
+    Uses the `structural_class` column written by compute_connectivity_corridors.py,
+    so the figure carries exactly the classification the manuscript defines:
+    interior = all six H3 neighbours occupied, edge = one to five, isolated = none.
+    An earlier version derived its own Core/Connected split at a >=2-neighbour
+    threshold, which matched neither the text nor the analysis outputs.
+    """
+    sc = row.get("structural_class")
+    if pd.notna(sc) and sc in ("Interior", "Edge", "Isolated"):
+        return sc
+
     if row.get("occupied") == True or row.get("total_records", 0) > 0:
-        return "Connected"
+        n = row.get("occ_nbrs", 0)
+        if n == 0:
+            return "Isolated"
+        return "Interior" if n >= 6 else "Edge"
     return "Unknown"
 
 gdf_all["cell_type_final"] = gdf_all.apply(infer_cell_type, axis=1)
 
 fig = plt.figure(figsize=(FIG_W, FIG_H), facecolor="white")
 ax  = setup_ax(fig)
-ax.set_title("(a)  Cell Type", loc="left", pad=6,
+ax.set_title("(a)  Structural Position", loc="left", pad=6,
              fontweight="bold", fontsize=11)
 
 add_basemap(ax)
 
 # Draw all cells: occupied get full color, unoccupied get ghost
-for celltype in ["Unknown", "Isolated", "Connected", "Core"]:
+for celltype in ["Unknown", "Isolated", "Edge", "Interior"]:
     subset = gdf_all[gdf_all["cell_type_final"] == celltype]
     if len(subset) == 0:
         continue
@@ -200,12 +218,12 @@ add_scalebar(ax)
 # Legend
 celltype_counts = gdf_all[gdf_all.index.isin(gdf_all[occ_mask].index)]["cell_type_final"].value_counts()
 handles = [
-    mpatches.Patch(facecolor=CELLTYPE_COLORS["Core"], edgecolor=BORDER_COLOR,
+    mpatches.Patch(facecolor=CELLTYPE_COLORS["Interior"], edgecolor=BORDER_COLOR,
                    alpha=OCC_ALPHA,
-                   label=f"Core             (n = {celltype_counts.get('Core', 0)})"),
-    mpatches.Patch(facecolor=CELLTYPE_COLORS["Connected"], edgecolor=BORDER_COLOR,
+                   label=f"Interior       (n = {celltype_counts.get('Interior', 0)})"),
+    mpatches.Patch(facecolor=CELLTYPE_COLORS["Edge"], edgecolor=BORDER_COLOR,
                    alpha=OCC_ALPHA,
-                   label=f"Connected    (n = {celltype_counts.get('Connected', 0)})"),
+                   label=f"Edge            (n = {celltype_counts.get('Edge', 0)})"),
     mpatches.Patch(facecolor=CELLTYPE_COLORS["Isolated"], edgecolor=BORDER_COLOR,
                    alpha=OCC_ALPHA,
                    label=f"Isolated      (n = {celltype_counts.get('Isolated', 0)})"),
@@ -366,26 +384,21 @@ save_fig(fig, OUT, "fig_Conn_C_patch_size")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# FIGURE D — Ecological Importance & Keystone Status
+# FIGURE D — Occupied neighbours & keystone status
 # ══════════════════════════════════════════════════════════════════════════════
-print("[4/5] Ecological Importance …")
+# This panel previously showed the Ecological Importance Score, a weighted composite
+# removed from the study in revision (Reviewer 2, comment 3). It now shows the
+# occupied first-ring neighbour count, which is the observable quantity that the
+# score was largely a re-expression of, and which serves as the CPI's connectivity
+# component.
+print("[4/5] Occupied neighbours …")
 
-try:
-    ecolimp_vals = gdf_all.loc[occ_mask, "ecological_importance"].dropna()
-    if len(ecolimp_vals) > 0:
-        ei_min, ei_max = ecolimp_vals.min(), ecolimp_vals.max()
-    else:
-        ei_min, ei_max = 0, 100
-except Exception as e:
-    print(f"  Warning: ecological_importance not available: {e}")
-    ei_min, ei_max = 0, 100
-
-norm_E = mcolors.Normalize(vmin=ei_min, vmax=ei_max)
+norm_E  = mcolors.Normalize(vmin=0, vmax=6)
 cmap_E = mpl.colormaps["plasma"]
 
 fig = plt.figure(figsize=(FIG_W, FIG_H), facecolor="white")
 ax  = setup_ax(fig)
-ax.set_title("(d)  Ecological Importance & Keystone Status", loc="left", pad=6,
+ax.set_title("(d)  Occupied Neighbours & Keystone Status", loc="left", pad=6,
              fontweight="bold", fontsize=11)
 
 add_basemap(ax)
@@ -393,7 +406,7 @@ draw_hex_base(ax, gdf_all[unocc_mask])
 
 occ_gdf = gdf_all[occ_mask].copy()
 try:
-    occ_gdf["color"] = occ_gdf["ecological_importance"].apply(
+    occ_gdf["color"] = occ_gdf["occ_nbrs"].apply(
         lambda v: mcolors.to_hex(cmap_E(norm_E(v))) if pd.notna(v) else "#CCCCCC")
     occ_gdf.plot(ax=ax, color=occ_gdf["color"].tolist(),
                  edgecolor=BORDER_COLOR, linewidth=BORDER_LW + 0.1,
@@ -460,18 +473,19 @@ fig, axes = plt.subplots(2, 2, figsize=(14.0, 10.5), facecolor="white",
 fig.patch.set_facecolor("white")
 
 PANEL_TITLES = [
-    "(a)  Cell Type",
+    "(a)  Structural Position",
     "(b)  Isolation Distance",
     "(c)  Patch Size",
-    "(d)  Ecological Importance",
+    "(d)  Occupied Neighbours",
 ]
 
-for ax in axes.flat:
+for _gi, ax in enumerate(axes.flat):
     ax.set_xlim(XMIN, XMAX)
     ax.set_ylim(YMIN, YMAX)
     ax.set_aspect("equal")
     ax.set_facecolor("none")
-    ax.tick_params(left=False, bottom=False, labelleft=False, labelbottom=False)
+    add_graticule(ax, xlabels=_gi >= 2, ylabels=_gi % 2 == 0,
+                  fontsize=6.0)
     for sp in ax.spines.values():
         sp.set_edgecolor("#AAAAAA")
         sp.set_linewidth(0.5)
@@ -488,7 +502,7 @@ for ax in axes.flat:
 # Panel A — Cell Type
 ax0 = axes[0, 0]
 celltype_counts = gdf_all[gdf_all.index.isin(gdf_all[occ_mask].index)]["cell_type_final"].value_counts()
-for celltype in ["Unknown", "Isolated", "Connected", "Core"]:
+for celltype in ["Unknown", "Isolated", "Edge", "Interior"]:
     subset = gdf_all[gdf_all["cell_type_final"] == celltype]
     if len(subset) == 0:
         continue
@@ -500,12 +514,12 @@ for celltype in ["Unknown", "Isolated", "Connected", "Core"]:
 
 # Legend for Panel A
 handles_a = [
-    mpatches.Patch(facecolor=CELLTYPE_COLORS["Core"], edgecolor=BORDER_COLOR,
+    mpatches.Patch(facecolor=CELLTYPE_COLORS["Interior"], edgecolor=BORDER_COLOR,
                    alpha=OCC_ALPHA,
-                   label=f"Core (n={celltype_counts.get('Core', 0)})"),
-    mpatches.Patch(facecolor=CELLTYPE_COLORS["Connected"], edgecolor=BORDER_COLOR,
+                   label=f"Interior (n={celltype_counts.get('Interior', 0)})"),
+    mpatches.Patch(facecolor=CELLTYPE_COLORS["Edge"], edgecolor=BORDER_COLOR,
                    alpha=OCC_ALPHA,
-                   label=f"Connected (n={celltype_counts.get('Connected', 0)})"),
+                   label=f"Edge (n={celltype_counts.get('Edge', 0)})"),
     mpatches.Patch(facecolor=CELLTYPE_COLORS["Isolated"], edgecolor=BORDER_COLOR,
                    alpha=OCC_ALPHA,
                    label=f"Isolated (n={celltype_counts.get('Isolated', 0)})"),
@@ -572,11 +586,11 @@ ax2.legend(handles=handles_c, loc="upper left", fontsize=6.5, framealpha=0.90,
            edgecolor="#CCCCCC", handlelength=1.2, labelspacing=0.25,
            borderpad=0.4, fancybox=True)
 
-# Panel D — Ecological Importance
+# Panel D — Occupied neighbours
 ax3 = axes[1, 1]
 occ_gdf_d = gdf_all[occ_mask].copy()
 try:
-    occ_gdf_d["_c"] = occ_gdf_d["ecological_importance"].apply(
+    occ_gdf_d["_c"] = occ_gdf_d["occ_nbrs"].apply(
         lambda v: mcolors.to_hex(cmap_E(norm_E(v))) if pd.notna(v) else "#CCCCCC")
     occ_gdf_d.plot(ax=ax3, color=occ_gdf_d["_c"].tolist(),
                   edgecolor=BORDER_COLOR, linewidth=0.3, alpha=OCC_ALPHA, zorder=3)
@@ -599,7 +613,7 @@ for _, row in ks_cells.iterrows():
 cax_d = fig.add_axes([0.92, 0.08, 0.012, 0.36])
 try:
     cb_d = ColorbarBase(cax_d, cmap=cmap_E, norm=norm_E, orientation="vertical")
-    cb_d.set_label("Ecological\nImportance", fontsize=7.5)
+    cb_d.set_label("Occupied\nneighbours", fontsize=7.5)
     cb_d.ax.tick_params(labelsize=7)
 except Exception as e:
     print(f"  Colorbar D: {e}")
@@ -608,9 +622,9 @@ except Exception as e:
 keystone_count = len(ks_cells)
 handles_d = [
     mpatches.Patch(facecolor=mcolors.to_hex(cmap_E(0.8)), edgecolor=BORDER_COLOR,
-                   alpha=OCC_ALPHA, label="High importance"),
+                   alpha=OCC_ALPHA, label="Many neighbours (5-6)"),
     mpatches.Patch(facecolor=mcolors.to_hex(cmap_E(0.2)), edgecolor=BORDER_COLOR,
-                   alpha=OCC_ALPHA, label="Low importance"),
+                   alpha=OCC_ALPHA, label="Few neighbours (1-2)"),
     mpatches.Patch(facecolor="none", edgecolor="red", linewidth=1.5,
                    label=f"Keystone (n={keystone_count})"),
 ]
