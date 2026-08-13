@@ -57,10 +57,13 @@ print(f"Weights matrix: {w.n} observations, {w.pct_nonzero:.2%} non-zero")
 # for the same data, and the manuscript text and the Figure S1 caption ended up
 # quoting two different draws. esda's Moran takes no seed argument, so the global
 # NumPy seed is the only lever; it is sufficient, and verified reproducible here.
+# 9,999 permutations, matching compute_lisa.py. At 999 the estimate of a small tail
+# probability is coarse — the same seed gave p = 0.004 at 999 and 0.003 at 9,999.
 SEED = 42
+PERMUTATIONS = 9999
 np.random.seed(SEED)
-print(f"\nComputing Global Moran's I (999 permutations, seed {SEED})...")
-moran = Moran(gdf[richness_col].values, w, permutations=999)
+print(f"\nComputing Global Moran's I ({PERMUTATIONS} permutations, seed {SEED})...")
+moran = Moran(gdf[richness_col].values, w, permutations=PERMUTATIONS)
 
 print(f"\n{'='*60}")
 print(f"GLOBAL MORAN'S I RESULTS")

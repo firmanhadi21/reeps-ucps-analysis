@@ -52,7 +52,14 @@ os.chdir(str(REEPS_BASE))
 
 os.makedirs("figures", exist_ok=True)   # a fresh checkout has no figures/
 SEED = 42
-PERMUTATIONS = 999
+# 9,999 rather than the conventional 999. At 999 the Monte Carlo error is about
+# +/-0.007 near p = 0.05, enough to flip a borderline cell between runs and between
+# esda builds. One cell has a true p near 0.051 but came out significant in 2 of 12
+# seeds at 999 permutations; at 9,999 it settles at 0.0513 and the classification is
+# stable, so the published counts no longer depend on the environment. Verified
+# unchanged at 99,999. One further cell sits at p ~ 0.05 and still moves between
+# seeds; the sweep below reports that residual rather than hiding it.
+PERMUTATIONS = 9999
 QUAD = {1: "High-High", 2: "Low-High", 3: "Low-Low", 4: "High-Low"}
 COLORS = {
     "High-High": "#d7191c",
