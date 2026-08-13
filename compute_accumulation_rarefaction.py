@@ -37,6 +37,7 @@ import pandas as pd
 
 os.chdir(str(REEPS_BASE))
 
+os.makedirs("figures", exist_ok=True)   # a fresh checkout has no figures/
 SEED = 42
 BOOTSTRAP = 500
 

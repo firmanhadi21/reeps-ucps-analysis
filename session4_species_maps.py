@@ -49,6 +49,7 @@ from shapely.geometry import Polygon
 
 os.chdir(str(REEPS_BASE))
 
+os.makedirs("figures", exist_ok=True)   # a fresh checkout has no figures/
 CR_SPECIES = {
     "Panthera pardus melas": "Javan Leopard",
     "Nycticebus javanicus": "Javan Slow Loris",

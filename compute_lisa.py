@@ -50,6 +50,7 @@ from shapely.geometry import Polygon
 
 os.chdir(str(REEPS_BASE))
 
+os.makedirs("figures", exist_ok=True)   # a fresh checkout has no figures/
 SEED = 42
 PERMUTATIONS = 999
 QUAD = {1: "High-High", 2: "Low-High", 3: "Low-Low", 4: "High-Low"}
@@ -89,8 +90,10 @@ def main() -> None:
 
     w = build_weights(cells)
 
-    np.random.seed(SEED)
-    lm = Moran_Local(y, w, permutations=PERMUTATIONS)
+    # Pass the seed explicitly rather than relying on the global NumPy state:
+    # Moran_Local accepts one, and the global seed is not guaranteed to reach
+    # esda's internal generator across versions or when n_jobs > 1.
+    lm = Moran_Local(y, w, permutations=PERMUTATIONS, seed=SEED)
     labels = classify(lm)
 
     counts = pd.Series(labels).value_counts()
@@ -100,8 +103,8 @@ def main() -> None:
     # How much of this survives a change of seed?
     tallies = {}
     for s in range(20):
-        np.random.seed(s)
-        t = pd.Series(classify(Moran_Local(y, w, permutations=PERMUTATIONS)))
+        t = pd.Series(classify(
+            Moran_Local(y, w, permutations=PERMUTATIONS, seed=s)))
         for k, v in t.value_counts().items():
             tallies.setdefault(k, []).append(v)
     print("\nacross 20 seeds:")

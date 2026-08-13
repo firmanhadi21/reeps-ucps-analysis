@@ -52,6 +52,12 @@ DERIVED = [
     "cpi_correlation_matrix.csv", "pca_cpi_weights.csv",
     "h3_resolution_comparison.csv", "chao1_comparison.csv",
     "chao1_per_period.csv", "effort_per_period.csv",
+    # Land-cover derived, no species content. The aggregated one is required:
+    # compute_cpi_pca6.py reads it for the habitat-permeability component, so
+    # without it the CPI stage cannot run at all.
+    "resistance_res9_aggregated_to_res8.csv", "resistance_res9_results.csv",
+    "resistance_corridor_results.csv",
+    "morans_i_results.csv", "lisa_results.csv",
 ]
 
 CR = {"Panthera pardus melas", "Nycticebus javanicus", "Manis javanica"}
@@ -72,11 +78,50 @@ def main() -> None:
         print(f"  wrote reeps_occurrences_full.csv ({len(occ)} rows) "
               f"WITH coordinates")
     else:
-        agg = (occ.groupby(["h3_index", "Species", "Year"])
+        # dropna=False is essential: 16 of the 493 records carry no survey year,
+        # and pandas drops NaN group keys by default. Without it the package loses
+        # those records and Table 1 no longer reproduces — the aggregate came to
+        # 477 records, with seven species undercounted and two of them short a
+        # cell as well.
+        agg = (occ.groupby(["h3_index", "Species", "Year"], dropna=False)
                .size().reset_index(name="records"))
+        agg["Year"] = agg["Year"].astype("Int64")
         agg.to_csv(OUT / "reeps_h3_aggregated.csv", index=False)
         print(f"\n  wrote reeps_h3_aggregated.csv "
               f"({len(agg)} species-cell-period rows, no coordinates)")
+
+        # The package is worthless to a reviewer if it does not reproduce the
+        # paper, so refuse to emit one that does not.
+        rebuilt = agg.groupby("Species").agg(
+            records=("records", "sum"), cells=("h3_index", "nunique"))
+        source = occ.groupby("Species").agg(
+            records=("Species", "size"), cells=("h3_index", "nunique"))
+        mismatch = [(s, tuple(rebuilt.loc[s]), tuple(source.loc[s]))
+                    for s in source.index
+                    if tuple(rebuilt.loc[s]) != tuple(source.loc[s])]
+        assert not mismatch, f"aggregate does not reproduce Table 1: {mismatch}"
+        assert int(rebuilt["records"].sum()) == len(occ), (
+            f"aggregate holds {int(rebuilt['records'].sum())} records, "
+            f"source has {len(occ)}")
+        print(f"  checked: rebuilds Table 1 exactly "
+              f"({int(rebuilt['records'].sum())} records, "
+              f"{len(rebuilt)} species)")
+
+        # The per-record table with the sensitive columns removed. This is what
+        # makes the package runnable: four of the analysis scripts read
+        # reeps_h3.csv and expect one row per record, so shipping only the
+        # aggregate leaves a reviewer unable to execute the pipeline at all.
+        # Dropping Latitude, Longitude and Location gives identical protection —
+        # what remains is the H3 cell, which the published figures already map.
+        redacted = occ.drop(columns=[c for c in ("Latitude", "Longitude",
+                                                 "Location")
+                                     if c in occ.columns])
+        redacted.to_csv(OUT / "reeps_h3.csv", index=False)
+        for col in ("Latitude", "Longitude", "Location"):
+            assert col not in redacted.columns, f"{col} leaked into reeps_h3.csv"
+        assert len(redacted) == len(occ)
+        print(f"  wrote reeps_h3.csv ({len(redacted)} records, "
+              f"point localities removed, {len(redacted.columns)} fields)")
 
         cells = sorted(occ["h3_index"].dropna().unique())
         cen = pd.DataFrame(

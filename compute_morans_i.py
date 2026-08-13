@@ -11,8 +11,11 @@ from esda.moran import Moran
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from matplotlib import cm
+import os
 import warnings
 warnings.filterwarnings('ignore')
+
+os.makedirs("figures", exist_ok=True)   # a fresh checkout has no figures/
 
 # Load H3 grid data.
 #
@@ -47,8 +50,16 @@ print("\nBuilding spatial weights matrix (Queen contiguity)...")
 w = Queen.from_dataframe(gdf, use_index=False)
 print(f"Weights matrix: {w.n} observations, {w.pct_nonzero:.2%} non-zero")
 
-# Compute Global Moran's I
-print("\nComputing Global Moran's I...")
+# Compute Global Moran's I.
+#
+# The permutation p-value is a Monte Carlo estimate, so without a fixed seed it
+# moves between runs — repeated runs of this script gave p = 0.002, 0.003 and 0.005
+# for the same data, and the manuscript text and the Figure S1 caption ended up
+# quoting two different draws. esda's Moran takes no seed argument, so the global
+# NumPy seed is the only lever; it is sufficient, and verified reproducible here.
+SEED = 42
+np.random.seed(SEED)
+print(f"\nComputing Global Moran's I (999 permutations, seed {SEED})...")
 moran = Moran(gdf[richness_col].values, w, permutations=999)
 
 print(f"\n{'='*60}")

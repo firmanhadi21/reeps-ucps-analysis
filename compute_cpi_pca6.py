@@ -157,8 +157,12 @@ def main() -> None:
     weights = wl / wl.sum()
 
     print("\nPCA-derived weights:")
-    published = {"Richness": 17.7, "Connectivity": 18.1, "Threatened": 16.9,
-                 "Diversity": 18.0, "Co_occurrence": 18.0, "Permeability": 11.3}
+    # Table 2 of the manuscript, for comparison with the freshly computed
+    # weights. These were updated when the CPI was rebuilt to the six-component
+    # specification; the earlier set (17.7 / 18.1 / 16.9 / 18.0 / 18.0 / 11.3)
+    # belonged to the version before that rebuild.
+    published = {"Richness": 16.4, "Connectivity": 18.4, "Threatened": 17.7,
+                 "Diversity": 16.4, "Co_occurrence": 17.1, "Permeability": 14.0}
     for lab, w in zip(LABELS, weights):
         print(f"  {lab:14s} {w*100:5.1f}%   (manuscript: {published[lab]:4.1f}%)")
 
@@ -169,7 +173,7 @@ def main() -> None:
     df["Rank"] = np.arange(1, len(df) + 1)
 
     print(f"\nCPI range: {df['Priority_Index'].min():.3f}-"
-          f"{df['Priority_Index'].max():.3f}   (manuscript: 0.116-0.929)")
+          f"{df['Priority_Index'].max():.3f}   (manuscript: 0.218-0.879)")
     print("tiers:", df["Priority_Tier"].value_counts().to_dict())
 
     # ── correlation matrix among the six normalised components ───────────────
@@ -177,10 +181,10 @@ def main() -> None:
     bio = [c for c in LABELS if c != "Permeability"]
     off = corr.loc[bio, bio].values[np.triu_indices(len(bio), 1)]
     print(f"\nbiodiversity inter-correlations: r = {off.min():.2f}-{off.max():.2f}"
-          f"   (manuscript: 0.54-0.80)")
+          f"   (manuscript: 0.10-0.93)")
     pm = corr.loc["Permeability", bio].abs()
     print(f"permeability |r| vs biodiversity: max {pm.max():.2f}"
-          f"   (manuscript: < 0.16)")
+          f"   (manuscript: <= 0.26)")
 
     cols = (["Rank", "h3_index", "Priority_Tier"] + LABELS +
             ["Priority_Index", "lat", "lon"] +
